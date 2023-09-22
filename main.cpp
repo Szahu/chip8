@@ -7,7 +7,7 @@
 #include <cstring>
 #include <fstream>
 
-#include "SDL.h"
+#include "SDL3/SDL.h"
 
 void print_hex(const uint16_t& val) {
     printf("%4X\n", val);
@@ -35,8 +35,8 @@ void print_byte(const char byte) {
 }
 
 void print_display(const unsigned char* display, const unsigned int display_width, const unsigned int display_height) {
-    for (int i = 0;i < display_height; ++i) {
-        for (int j = 0;j < display_width / 8; ++j) {
+    for (unsigned int i = 0;i < display_height; ++i) {
+        for (unsigned int j = 0;j < display_width / 8; ++j) {
             printf(BYTE_TO_BINARY_PATTERN, BYTE_TO_BINARY(display[i * display_width / 8 + j]));
         }
         printf("\n");
@@ -56,23 +56,73 @@ bool load_program_from_file(const std::string& filename, char* mem, const unsign
     return (bool)file.read(reinterpret_cast<char*>(mem + pc), size);
 }
 
-void sdl_thread() {
-    
-    if (SDL_Init(SDL_INIT_EVERYTHING) != 0) {
-        printf("error initializing SDL: %s\n", SDL_GetError());
+void chip_display_to_pixel_array(const unsigned char* chip_display, unsigned char* pixel_array,
+                                 const unsigned int display_width, const unsigned int display_height) {
+
+    for (unsigned int i = 0;i < display_width * display_height / 8; ++i) {
+        for (unsigned int j = 0 ;j < 8; ++j) {
+            char mask = 0b10000000 >> j;
+            unsigned char pixel = 0x00;
+
+            if ((mask & chip_display[i]) != 0) {
+                pixel = 0xFF;
+            }
+
+            pixel_array[3 * (i * 8 + j)] = pixel;
+            pixel_array[3 * (i * 8 + j) + 1] = pixel;
+            pixel_array[3 * (i * 8 + j) + 2] = pixel;
+        }
+    }
+
+}
+
+void sdl_thread_fun(unsigned char* chip_display, bool* terminate) {
+
+    const unsigned int SDL_FPS = 60;
+
+    if (SDL_Init(SDL_INIT_VIDEO) < 0) {
+        printf("Error while initing SDL.\n");
         return;
     }
 
-    SDL_Window* window = SDL_CreateWindow("Game", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1000, 1000, 0);
+    SDL_Window* window = SDL_CreateWindow("CHIP8 emulator", 640, 320, 0);
 
-    while (true);
+    SDL_Renderer* renderer = SDL_CreateRenderer(window, NULL, 0);
+
+    SDL_Event event;
+
+    unsigned char pixel_array[64 * 32 * 3];
+
+    while (!(*terminate)) {
+
+        while (SDL_PollEvent(&event)) {
+            *terminate = event.type == SDL_EVENT_QUIT;
+        }
+
+        // Clear the renderer
+        SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
+        SDL_RenderClear(renderer);
+
+        chip_display_to_pixel_array(chip_display, pixel_array, 64, 32);
+        SDL_Surface* surface = SDL_CreateSurfaceFrom(reinterpret_cast<void*>(pixel_array), 64, 32, 3 * 64, SDL_PixelFormatEnum::SDL_PIXELFORMAT_RGB24);
+        SDL_Texture* texture = SDL_CreateTextureFromSurface(renderer, surface);
+
+        SDL_RenderTexture(renderer, texture, NULL, NULL); 
+
+        // Update the screen
+        SDL_RenderPresent(renderer);
+
+        std::this_thread::sleep_for(std::chrono::milliseconds((unsigned int)((1.0f / SDL_FPS) * 1000.0f)));
+    }
+
+    SDL_DestroyRenderer(renderer);
+    SDL_DestroyWindow(window);
+    SDL_Quit();
 }
 
 int main(int argc, char** argv) {
 
     std::cout << "Running the emulator!" << std::endl;
-
-    sdl_thread();
 
     constexpr unsigned int MEM_SIZE = 4096; 
     constexpr unsigned int DISPLAY_WIDTH = 64;
@@ -152,11 +202,12 @@ int main(int argc, char** argv) {
         }
     });
 
-    // TEMP TEMP TEMP
+    if (!load_program_from_file(argv[1], reinterpret_cast<char*>(mem), program_counter)) {
+        printf("Failed to load the program, from path %s.\n", argv[1]);
+        return 1;
+    }
 
-    load_program_from_file(argv[1], reinterpret_cast<char*>(mem), program_counter);
-
-    // TEMP END TEMP END TEMO END
+    std::thread sdl_thread(sdl_thread_fun, display, &terminate);
 
     // main cpu cycle
     while (!terminate) {
@@ -304,8 +355,6 @@ int main(int argc, char** argv) {
             } 
 
             regs[0xF] = flipped_off;
-
-            print_display(display, DISPLAY_WIDTH, DISPLAY_HEIGHT);
         } else if (X == 0xF && Z == 0x5 && W == 0x5) {
 
             // FX55 -> Store registers from 0 to X to memory starting at I
@@ -341,9 +390,12 @@ int main(int argc, char** argv) {
         std::this_thread::sleep_for(std::chrono::milliseconds((unsigned int)((1.0f / CLOCK_FPS) * 1000.0f)));
     }
 
+    sdl_thread.join();
     deley_timer_thread.join();
     sound_timer_thread.join();
     sound_thread.join();
+
+    std::cout << "All threads joined, terminating." << std::endl;
 
     return 0;
 }
