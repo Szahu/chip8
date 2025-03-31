@@ -8,16 +8,26 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
-
+#include <cstdlib>
+#include <filesystem>
+#include <vector>
 #include "SDL3/SDL.h"
 
 void print_hex(const uint16_t &val) { printf("%4X\n", val); }
 
-// only works on WSL
+#ifdef _WIN32
+#include <windows.h>
+#endif
 void play_beep(const unsigned int &ms) {
-    const std::string command =
-        "powershell.exe '[console]::beep(261.6," + std::to_string(ms) + ")'";
-    std::system(command.c_str());
+
+#ifdef _WIN32 
+    Beep(523, ms);
+#endif
+
+#ifdef linux
+    printf("\a");
+#endif
+
 }
 
 #define BYTE_TO_BINARY_PATTERN "%c%c%c%c%c%c%c%c"
@@ -69,6 +79,28 @@ void chip_display_to_pixel_array(const unsigned char *chip_display, unsigned cha
             pixel_array[3 * (i * 8 + j) + 2] = pixel;
         }
     }
+}
+
+void run_program_menu(std::string& program_filepath) {
+
+    unsigned int entry_index = 0;
+    unsigned int entry_max = 0;
+    std::vector<std::string> entries;
+    for (const auto& entry : std::filesystem::directory_iterator("./../../chip8-roms/demos")) {
+        std::cout << entry_index << ": " << entry.path().filename() << std::endl;;
+        entry_max = entry_index;
+        ++entry_index;
+        entries.push_back(entry.path().generic_string());
+    }
+
+    unsigned int choice = -1;
+
+    while (choice < 0 || choice > entry_max) {
+        std::cout << "Choose a program: ";
+        std::cin >> choice;
+    }
+
+    program_filepath = entries[choice];
 }
 
 void sdl_thread_fun(unsigned char *chip_display, bool *terminate, uint8_t *keys_pressed,
@@ -159,7 +191,7 @@ int main(int argc, char **argv) {
     constexpr unsigned int PC_START_POS = 0x200;
     constexpr unsigned int DELEY_TIMER_FPS = 60;
     constexpr unsigned int SOUND_TIMER_FPS = 60;
-    constexpr unsigned int CLOCK_FPS = 1000000;
+    constexpr unsigned int CLOCK_FPS = 1000;
     constexpr uint16_t INSTR_TERMIANTE = 0xFFFF;
     constexpr bool USE_OLD_BIT_SHIFT = false;
 
@@ -206,6 +238,15 @@ int main(int argc, char **argv) {
     bool terminate = false;
     bool waiting_for_key = false;
 
+    std::string program_path;
+
+    run_program_menu(program_path);
+
+    if (!load_program_from_file(program_path, reinterpret_cast<char *>(mem), program_counter)) {
+        printf("Failed to load the program, from path %s.\n", argv[1]);
+        return 1;
+    }
+
     std::thread deley_timer_thread([&]() {
         while (!terminate) {
             if (delay_timer > 0) {
@@ -235,11 +276,6 @@ int main(int argc, char **argv) {
                 std::chrono::milliseconds((unsigned int)((1.0f / SOUND_TIMER_FPS) * 1000.0f)));
         }
     });
-
-    if (!load_program_from_file(argv[1], reinterpret_cast<char *>(mem), program_counter)) {
-        printf("Failed to load the program, from path %s.\n", argv[1]);
-        return 1;
-    }
 
     std::mutex key_mutex;
 
@@ -454,7 +490,7 @@ int main(int argc, char **argv) {
             // FN15 -> set deley timer to regs[N]
             delay_timer = regs[Y];
 
-        } else if (X == 0xF && Z == 0x1 && W == 0x5) {
+        } else if (X == 0xF && Z == 0x1 && W == 0x8) {
 
             // FN18 -> set the sound timer to regs[Y]
             sound_timer = regs[Y];
@@ -484,6 +520,11 @@ int main(int argc, char **argv) {
             std::lock_guard<std::mutex> lock(key_mutex);
             if (!keys_pressed[regs[Y]])
                 program_counter += 2;
+
+        } else if (X == 0xC) {
+
+            // CQNN -> set regs[Y] to NN & random number
+            regs[Y] = (rand() % 0xFF) & (instruction && 0x00FF);
 
         } else {
             std::cout << "Unrecognised instruction: " << std::hex << instruction << std::dec
